@@ -30,6 +30,71 @@ fn executeSQL(db: ?*c.sqlite3, sql: []const u8) !void {
     std.debug.print("SQL executed successfully: {s}\n", .{sql});
 }
 
+// Transaction management functions
+
+// Check if database is in autocommit mode
+fn checkAutocommit(db: ?*c.sqlite3) void {
+    const autocommit = c.sqlite3_get_autocommit(db);
+    std.debug.print("Database autocommit status: {} (1=autocommit, 0=in transaction)\n", .{autocommit});
+}
+
+// Begin a transaction
+fn beginTransaction(db: ?*c.sqlite3) !void {
+    try executeSQL(db, "BEGIN TRANSACTION");
+    std.debug.print("✓ Transaction started\n", .{});
+}
+
+// Commit the current transaction
+fn commitTransaction(db: ?*c.sqlite3) !void {
+    try executeSQL(db, "COMMIT");
+    std.debug.print("✓ Transaction committed\n", .{});
+}
+
+// Rollback the current transaction
+fn rollbackTransaction(db: ?*c.sqlite3) !void {
+    try executeSQL(db, "ROLLBACK");
+    std.debug.print("✓ Transaction rolled back\n", .{});
+}
+
+// Create a savepoint
+fn createSavepoint(db: ?*c.sqlite3, name: []const u8) !void {
+    var buf: [256]u8 = undefined;
+    const savepoint_sql = std.fmt.bufPrint(&buf, "SAVEPOINT {s}", .{name}) catch return error.BufferTooSmall;
+    try executeSQL(db, savepoint_sql);
+    std.debug.print("✓ Savepoint '{s}' created\n", .{name});
+}
+
+// Release a savepoint
+fn releaseSavepoint(db: ?*c.sqlite3, name: []const u8) !void {
+    var buf: [256]u8 = undefined;
+    const release_sql = std.fmt.bufPrint(&buf, "RELEASE SAVEPOINT {s}", .{name}) catch return error.BufferTooSmall;
+    try executeSQL(db, release_sql);
+    std.debug.print("✓ Savepoint '{s}' released\n", .{name});
+}
+
+// Rollback to a savepoint
+fn rollbackToSavepoint(db: ?*c.sqlite3, name: []const u8) !void {
+    var buf: [256]u8 = undefined;
+    const rollback_sql = std.fmt.bufPrint(&buf, "ROLLBACK TO SAVEPOINT {s}", .{name}) catch return error.BufferTooSmall;
+    try executeSQL(db, rollback_sql);
+    std.debug.print("✓ Rolled back to savepoint '{s}'\n", .{name});
+}
+
+// Get the number of database changes in the most recent operation
+fn getChanges(db: ?*c.sqlite3) i32 {
+    return c.sqlite3_changes(db);
+}
+
+// Get the total number of database changes since the connection was opened
+fn getTotalChanges(db: ?*c.sqlite3) i32 {
+    return c.sqlite3_total_changes(db);
+}
+
+// Get the rowid of the most recent successful INSERT
+fn getLastInsertRowid(db: ?*c.sqlite3) i64 {
+    return c.sqlite3_last_insert_rowid(db);
+}
+
 // Function to create a comprehensive test table with all data types
 fn createTable(db: ?*c.sqlite3) !void {
     const create_sql =
@@ -247,9 +312,79 @@ fn queryTestData(db: ?*c.sqlite3) !void {
     std.debug.print("=========================\n\n", .{});
 }
 
+// Simple insert function for transaction testing
+fn insertUser(db: ?*c.sqlite3, name: []const u8, email: []const u8) !void {
+    const insert_sql = "INSERT INTO users (name, email) VALUES (?, ?)";
+    var buf: [256]u8 = undefined;
+    const sql_cstr = createCString(&buf, insert_sql);
+
+    var stmt: ?*c.sqlite3_stmt = null;
+    var rc = c.sqlite3_prepare_v2(db, sql_cstr, -1, &stmt, null);
+
+    if (rc != c.SQLITE_OK) {
+        std.debug.print("Failed to prepare statement: {s}\n", .{c.sqlite3_errmsg(db)});
+        return error.PrepareError;
+    }
+    defer _ = c.sqlite3_finalize(stmt);
+
+    // Bind parameters
+    var name_buf: [256]u8 = undefined;
+    var email_buf: [256]u8 = undefined;
+    const name_cstr = createCString(&name_buf, name);
+    const email_cstr = createCString(&email_buf, email);
+
+    _ = c.sqlite3_bind_text(stmt, 1, name_cstr, -1, null);
+    _ = c.sqlite3_bind_text(stmt, 2, email_cstr, -1, null);
+
+    // Execute
+    rc = c.sqlite3_step(stmt);
+    if (rc != c.SQLITE_DONE) {
+        std.debug.print("Failed to insert user: {s}\n", .{c.sqlite3_errmsg(db)});
+        return error.InsertError;
+    }
+
+    const rowid = getLastInsertRowid(db);
+    const changes = getChanges(db);
+    std.debug.print("✓ Inserted user '{s}' (rowid: {}, changes: {})\n", .{ name, rowid, changes });
+}
+
+// Create a simple users table for transaction testing
+fn createUsersTable(db: ?*c.sqlite3) !void {
+    const create_sql =
+        \\CREATE TABLE IF NOT EXISTS users (
+        \\    id INTEGER PRIMARY KEY AUTOINCREMENT,
+        \\    name TEXT NOT NULL,
+        \\    email TEXT UNIQUE
+        \\);
+    ;
+    try executeSQL(db, create_sql);
+}
+
+// Count users in the database
+fn countUsers(db: ?*c.sqlite3) !i32 {
+    const query_sql = "SELECT COUNT(*) FROM users";
+    var buf: [256]u8 = undefined;
+    const sql_cstr = createCString(&buf, query_sql);
+
+    var stmt: ?*c.sqlite3_stmt = null;
+    const rc = c.sqlite3_prepare_v2(db, sql_cstr, -1, &stmt, null);
+
+    if (rc != c.SQLITE_OK) {
+        std.debug.print("Failed to prepare count query: {s}\n", .{c.sqlite3_errmsg(db)});
+        return error.QueryError;
+    }
+    defer _ = c.sqlite3_finalize(stmt);
+
+    if (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+        return c.sqlite3_column_int(stmt, 0);
+    }
+
+    return 0;
+}
+
 pub fn main() !void {
-    std.debug.print("zsqlite Phase 2 Demo - Complete Data Types\n", .{});
-    std.debug.print("==========================================\n\n", .{});
+    std.debug.print("zsqlite Phase 3 Demo - Transaction Management\n", .{});
+    std.debug.print("=============================================\n\n", .{});
 
     // Open database
     var db: ?*c.sqlite3 = null;
@@ -301,11 +436,104 @@ pub fn main() !void {
         std.debug.print("✓ Caught expected error: {}\n\n", .{err});
     };
 
-    std.debug.print("Phase 2 Demo completed successfully!\n", .{});
-    std.debug.print("All SQLite data types and binding functions demonstrated:\n", .{});
-    std.debug.print("✓ sqlite3_bind_text(), sqlite3_bind_int64(), sqlite3_bind_double()\n", .{});
-    std.debug.print("✓ sqlite3_bind_blob(), sqlite3_bind_null(), sqlite3_bind_zeroblob()\n", .{});
-    std.debug.print("✓ sqlite3_column_text(), sqlite3_column_int64(), sqlite3_column_double()\n", .{});
-    std.debug.print("✓ sqlite3_column_blob(), sqlite3_column_bytes(), sqlite3_column_type()\n", .{});
-    std.debug.print("✓ sqlite3_column_name(), sqlite3_column_count()\n", .{});
+    // Phase 3: Complete Transaction Management Demo
+    std.debug.print("=== Phase 3: Transaction Management Demo ===\n", .{});
+
+    // Create users table for transaction testing
+    try createUsersTable(db);
+
+    std.debug.print("\n--- Demo 1: Basic Transaction with Commit ---\n", .{});
+    checkAutocommit(db);
+
+    try beginTransaction(db);
+    checkAutocommit(db);
+
+    try insertUser(db, "John Doe", "john@example.com");
+    try insertUser(db, "Jane Doe", "jane@example.com");
+
+    std.debug.print("Changes in this transaction: {}\n", .{getChanges(db)});
+    std.debug.print("Total changes so far: {}\n", .{getTotalChanges(db)});
+
+    try commitTransaction(db);
+    checkAutocommit(db);
+
+    var user_count = try countUsers(db);
+    std.debug.print("Users after commit: {}\n", .{user_count});
+
+    std.debug.print("\n--- Demo 2: Transaction with Rollback ---\n", .{});
+    try beginTransaction(db);
+
+    try insertUser(db, "Bob Wilson", "bob@example.com");
+    try insertUser(db, "Alice Cooper", "alice@test.com");
+
+    std.debug.print("Users before rollback: {}\n", .{try countUsers(db)});
+    std.debug.print("Changes before rollback: {}\n", .{getChanges(db)});
+
+    try rollbackTransaction(db);
+    checkAutocommit(db);
+
+    user_count = try countUsers(db);
+    std.debug.print("Users after rollback: {} (should be same as before transaction)\n", .{user_count});
+
+    std.debug.print("\n--- Demo 3: Savepoints ---\n", .{});
+    try beginTransaction(db);
+
+    // Insert first user
+    try insertUser(db, "Sarah Connor", "sarah@future.com");
+    std.debug.print("Users after first insert: {}\n", .{try countUsers(db)});
+
+    // Create savepoint
+    try createSavepoint(db, "sp1");
+
+    // Insert second user
+    try insertUser(db, "Kyle Reese", "kyle@resistance.com");
+    std.debug.print("Users after second insert: {}\n", .{try countUsers(db)});
+
+    // Create another savepoint
+    try createSavepoint(db, "sp2");
+
+    // Insert third user
+    try insertUser(db, "Miles Dyson", "miles@cyberdyne.com");
+    std.debug.print("Users after third insert: {}\n", .{try countUsers(db)});
+
+    // Rollback to sp2 (removes Miles)
+    try rollbackToSavepoint(db, "sp2");
+    std.debug.print("Users after rollback to sp2: {}\n", .{try countUsers(db)});
+
+    // Release sp1 savepoint
+    try releaseSavepoint(db, "sp1");
+
+    // Commit the transaction (keeps Sarah and Kyle)
+    try commitTransaction(db);
+
+    user_count = try countUsers(db);
+    std.debug.print("Final user count after savepoint demo: {}\n", .{user_count});
+
+    std.debug.print("\n--- Demo 4: Nested Savepoints ---\n", .{});
+    try beginTransaction(db);
+
+    const before_nested = try countUsers(db);
+
+    try createSavepoint(db, "outer");
+    try insertUser(db, "T-800", "terminator@skynet.com");
+
+    try createSavepoint(db, "inner");
+    try insertUser(db, "T-1000", "t1000@skynet.com");
+
+    // Rollback inner savepoint only
+    try rollbackToSavepoint(db, "inner");
+    std.debug.print("After rolling back inner savepoint: {} users\n", .{try countUsers(db)});
+
+    // Commit outer transaction (keeps T-800, discards T-1000)
+    try commitTransaction(db);
+
+    const after_nested = try countUsers(db);
+    std.debug.print("Users added in nested demo: {}\n", .{after_nested - before_nested});
+
+    std.debug.print("Phase 3 Demo completed successfully!\n", .{});
+    std.debug.print("All transaction management functions demonstrated:\n", .{});
+    std.debug.print("✓ sqlite3_get_autocommit() - Check autocommit status\n", .{});
+    std.debug.print("✓ BEGIN TRANSACTION, COMMIT, ROLLBACK\n", .{});
+    std.debug.print("✓ SAVEPOINT, RELEASE SAVEPOINT, ROLLBACK TO SAVEPOINT\n", .{});
+    std.debug.print("✓ sqlite3_changes(), sqlite3_total_changes(), sqlite3_last_insert_rowid()\n", .{});
 }

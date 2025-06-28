@@ -4,7 +4,25 @@ A minimal, direct wrapper around SQLite's C API for Zig. Perfect for developers 
 
 ## Why zsqlite?
 
-**zsqlite** focuses on **direct C API access** with minimal abstraction, making it ideal for:
+**zsqlite** focuses on *### **Phase 3: Transaction Management (COMPLETED)**
+*Essential for data integrity*
+
+- ✓ `sqlite3_get### **Release Strategy**
+
+**v0.1.0** - Phase 1 (COMPLETED) - Basic functionality working
+**v0.2.0** - Phase 2 (COMPLETED) - Complete data type support  
+**v0.3.0** - Phase 3 (COMPLETED) - Transaction management
+**v0.4.0** - Phase 4 (Advanced querying)
+**v1.0.0** - Phases 5-6 (Production ready)
+**v2.0.0** - Phase 7 (Advanced features)mit()` - Check autocommit status
+- ✓ Manual transaction handling via `sqlite3_exec()`:
+  - ✓ `BEGIN TRANSACTION`
+  - ✓ `COMMIT`
+  - ✓ `ROLLBACK`
+  - ✓ `SAVEPOINT` / `RELEASE SAVEPOINT` / `ROLLBACK TO SAVEPOINT`
+- ✓ `sqlite3_changes()` - Get number of changed rows  
+- ✓ `sqlite3_total_changes()` - Get total changes in session
+- ✓ `sqlite3_last_insert_rowid()` - Get last inserted row ID API access** with minimal abstraction, making it ideal for:
 
 - **Learning SQLite C API** - Clear, documented examples of C interop
 - **Performance-critical applications** - Zero-overhead direct bindings
@@ -255,17 +273,20 @@ SQLite has 200+ functions, but most applications only need a core subset. This r
 - ✓ `sqlite3_column_name()` - Get column name
 - ✓ `sqlite3_column_count()` - Get number of columns
 
-### **Phase 3: Transaction Management (NEXT PRIORITY)**
+### **Phase 3: Transaction Management (COMPLETED)**
 *Essential for data integrity*
 
-- [ ] `sqlite3_get_autocommit()` - Check autocommit status
-- [ ] Manual transaction handling via `sqlite3_exec()`:
+- ✓ `sqlite3_get_autocommit()` - Check autocommit status
+- ✓ Manual transaction handling via `sqlite3_exec()`:
   - `BEGIN TRANSACTION`
   - `COMMIT`
   - `ROLLBACK`
   - `SAVEPOINT` / `RELEASE SAVEPOINT`
+- ✓ `sqlite3_changes()` - Get number of changed rows
+- ✓ `sqlite3_total_changes()` - Get total changes in session
+- ✓ `sqlite3_last_insert_rowid()` - Get last inserted row ID
 
-### **Phase 4: Advanced Querying**
+### **Phase 4: Advanced Querying (NEXT PRIORITY)**
 *Performance and flexibility improvements*
 
 - [ ] `sqlite3_reset()` - Reset prepared statement for reuse
@@ -345,7 +366,7 @@ SQLite has 200+ functions, but most applications only need a core subset. This r
 
 **v0.1.0** - Phase 1 (COMPLETED) - Basic functionality working
 **v0.2.0** - Phase 2 (COMPLETED) - Complete data type support
-**v0.3.0** - Phase 3 (Transaction management)
+**v0.3.0** - Phase 3 (COMPLETED) - Transaction management
 **v0.4.0** - Phase 4 (Advanced querying)
 **v1.0.0** - Phases 5-6 (Production ready)
 **v2.0.0** - Phase 7 (Advanced features)
