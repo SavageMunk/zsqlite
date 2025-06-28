@@ -286,17 +286,17 @@ SQLite has 200+ functions, but most applications only need a core subset. This r
 - ✓ `sqlite3_total_changes()` - Get total changes in session
 - ✓ `sqlite3_last_insert_rowid()` - Get last inserted row ID
 
-### **Phase 4: Advanced Querying (NEXT PRIORITY)**
+### **Phase 4: Advanced Querying (COMPLETED)**
 *Performance and flexibility improvements*
 
-- [ ] `sqlite3_reset()` - Reset prepared statement for reuse
-- [ ] `sqlite3_clear_bindings()` - Clear bound parameters
-- [ ] `sqlite3_sql()` - Get original SQL text
-- [ ] `sqlite3_changes()` - Get number of changed rows
-- [ ] `sqlite3_last_insert_rowid()` - Get last inserted row ID
-- [ ] `sqlite3_total_changes()` - Get total changes in session
+- ✓ `sqlite3_reset()` - Reset prepared statement for reuse
+- ✓ `sqlite3_clear_bindings()` - Clear bound parameters
+- ✓ `sqlite3_sql()` - Get original SQL text
+- ✓ `sqlite3_changes()` - Get number of changed rows
+- ✓ `sqlite3_last_insert_rowid()` - Get last inserted row ID
+- ✓ `sqlite3_total_changes()` - Get total changes in session
 
-### **Phase 5: Database Introspection**
+### **Phase 5: Database Introspection (NEXT PRIORITY)**
 *Schema discovery and metadata*
 
 - [ ] `sqlite3_table_column_metadata()` - Get column metadata
@@ -367,7 +367,7 @@ SQLite has 200+ functions, but most applications only need a core subset. This r
 **v0.1.0** - Phase 1 (COMPLETED) - Basic functionality working
 **v0.2.0** - Phase 2 (COMPLETED) - Complete data type support
 **v0.3.0** - Phase 3 (COMPLETED) - Transaction management
-**v0.4.0** - Phase 4 (Advanced querying)
+**v0.4.0** - Phase 4 (COMPLETED) - Advanced querying
 **v1.0.0** - Phases 5-6 (Production ready)
 **v2.0.0** - Phase 7 (Advanced features)
 

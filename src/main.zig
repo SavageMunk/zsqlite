@@ -382,9 +382,212 @@ fn countUsers(db: ?*c.sqlite3) !i32 {
     return 0;
 }
 
+// Phase 4: Advanced Querying Functions
+
+// Reset a prepared statement for reuse
+fn resetStatement(stmt: ?*c.sqlite3_stmt) !void {
+    const rc = c.sqlite3_reset(stmt);
+    if (rc != c.SQLITE_OK) {
+        std.debug.print("Failed to reset statement\n", .{});
+        return error.ResetError;
+    }
+    std.debug.print("✓ Statement reset for reuse\n", .{});
+}
+
+// Clear all bound parameters from a prepared statement
+fn clearBindings(stmt: ?*c.sqlite3_stmt) !void {
+    const rc = c.sqlite3_clear_bindings(stmt);
+    if (rc != c.SQLITE_OK) {
+        std.debug.print("Failed to clear bindings\n", .{});
+        return error.ClearBindingsError;
+    }
+    std.debug.print("✓ Parameter bindings cleared\n", .{});
+}
+
+// Get the original SQL text of a prepared statement
+fn getStatementSQL(stmt: ?*c.sqlite3_stmt) []const u8 {
+    const sql_ptr = c.sqlite3_sql(stmt);
+    if (sql_ptr == null) {
+        return "";
+    }
+    return std.mem.span(sql_ptr);
+}
+
+// Demonstrate prepared statement reuse with different parameters
+fn demonstrateStatementReuse(db: ?*c.sqlite3) !void {
+    const insert_sql = "INSERT INTO users (name, email) VALUES (?, ?)";
+    var buf: [256]u8 = undefined;
+    const sql_cstr = createCString(&buf, insert_sql);
+
+    var stmt: ?*c.sqlite3_stmt = null;
+    var rc = c.sqlite3_prepare_v2(db, sql_cstr, -1, &stmt, null);
+
+    if (rc != c.SQLITE_OK) {
+        std.debug.print("Failed to prepare reusable statement: {s}\n", .{c.sqlite3_errmsg(db)});
+        return error.PrepareError;
+    }
+    defer _ = c.sqlite3_finalize(stmt);
+
+    // Show the original SQL
+    const original_sql = getStatementSQL(stmt);
+    std.debug.print("Prepared statement SQL: {s}\n", .{original_sql});
+
+    // First execution
+    std.debug.print("\n--- First execution ---\n", .{});
+    var name_buf1: [256]u8 = undefined;
+    var email_buf1: [256]u8 = undefined;
+    const name1 = "Neo Anderson";
+    const email1 = "neo@matrix.com";
+    const name_cstr1 = createCString(&name_buf1, name1);
+    const email_cstr1 = createCString(&email_buf1, email1);
+
+    _ = c.sqlite3_bind_text(stmt, 1, name_cstr1, -1, null);
+    _ = c.sqlite3_bind_text(stmt, 2, email_cstr1, -1, null);
+
+    rc = c.sqlite3_step(stmt);
+    if (rc != c.SQLITE_DONE) {
+        std.debug.print("Failed to execute first insert: {s}\n", .{c.sqlite3_errmsg(db)});
+        return error.ExecuteError;
+    }
+    
+    std.debug.print("✓ First insert: {s} (rowid: {})\n", .{ name1, getLastInsertRowid(db) });
+
+    // Reset for reuse
+    try resetStatement(stmt);
+    
+    // Second execution with new parameters
+    std.debug.print("\n--- Second execution (reusing statement) ---\n", .{});
+    var name_buf2: [256]u8 = undefined;
+    var email_buf2: [256]u8 = undefined;
+    const name2 = "Trinity";
+    const email2 = "trinity@matrix.com";
+    const name_cstr2 = createCString(&name_buf2, name2);
+    const email_cstr2 = createCString(&email_buf2, email2);
+
+    _ = c.sqlite3_bind_text(stmt, 1, name_cstr2, -1, null);
+    _ = c.sqlite3_bind_text(stmt, 2, email_cstr2, -1, null);
+
+    rc = c.sqlite3_step(stmt);
+    if (rc != c.SQLITE_DONE) {
+        std.debug.print("Failed to execute second insert: {s}\n", .{c.sqlite3_errmsg(db)});
+        return error.ExecuteError;
+    }
+    
+    std.debug.print("✓ Second insert: {s} (rowid: {})\n", .{ name2, getLastInsertRowid(db) });
+
+    // Reset and clear bindings
+    try resetStatement(stmt);
+    try clearBindings(stmt);
+
+    // Third execution with partial binding (to show cleared bindings behavior)
+    std.debug.print("\n--- Third execution (partial binding after clear) ---\n", .{});
+    var name_buf3: [256]u8 = undefined;
+    const name3 = "Morpheus";
+    const name_cstr3 = createCString(&name_buf3, name3);
+
+    _ = c.sqlite3_bind_text(stmt, 1, name_cstr3, -1, null);
+    // Intentionally not binding email (should be NULL after clear_bindings)
+
+    rc = c.sqlite3_step(stmt);
+    if (rc != c.SQLITE_DONE) {
+        std.debug.print("Failed to execute third insert: {s}\n", .{c.sqlite3_errmsg(db)});
+        return error.ExecuteError;
+    }
+    
+    std.debug.print("✓ Third insert: {s} with NULL email (rowid: {})\n", .{ name3, getLastInsertRowid(db) });
+}
+
+// Demonstrate batch operations with statement reuse
+fn demonstrateBatchOperations(db: ?*c.sqlite3) !void {
+    const update_sql = "UPDATE users SET email = ? WHERE name = ?";
+    var buf: [256]u8 = undefined;
+    const sql_cstr = createCString(&buf, update_sql);
+
+    var stmt: ?*c.sqlite3_stmt = null;
+    var rc = c.sqlite3_prepare_v2(db, sql_cstr, -1, &stmt, null);
+
+    if (rc != c.SQLITE_OK) {
+        std.debug.print("Failed to prepare batch statement: {s}\n", .{c.sqlite3_errmsg(db)});
+        return error.PrepareError;
+    }
+    defer _ = c.sqlite3_finalize(stmt);
+
+    std.debug.print("Batch statement SQL: {s}\n", .{getStatementSQL(stmt)});
+
+    // Define batch updates
+    const updates = [_]struct { name: []const u8, email: []const u8 }{
+        .{ .name = "Neo Anderson", .email = "neo.anderson@zion.com" },
+        .{ .name = "Trinity", .email = "trinity@nebuchadnezzar.com" },
+        .{ .name = "Morpheus", .email = "morpheus@zion.com" },
+    };
+
+    var total_changes: i32 = 0;
+    
+    for (updates) |update| {
+        // Reset statement for each iteration
+        try resetStatement(stmt);
+        
+        // Bind new parameters
+        var email_buf: [256]u8 = undefined;
+        var name_buf: [256]u8 = undefined;
+        const email_cstr = createCString(&email_buf, update.email);
+        const name_cstr = createCString(&name_buf, update.name);
+
+        _ = c.sqlite3_bind_text(stmt, 1, email_cstr, -1, null);
+        _ = c.sqlite3_bind_text(stmt, 2, name_cstr, -1, null);
+
+        // Execute
+        rc = c.sqlite3_step(stmt);
+        if (rc != c.SQLITE_DONE) {
+            std.debug.print("Failed to execute batch update for {s}: {s}\n", .{ update.name, c.sqlite3_errmsg(db) });
+            continue;
+        }
+
+        const changes = getChanges(db);
+        total_changes += changes;
+        std.debug.print("✓ Updated {s}: {} rows affected\n", .{ update.name, changes });
+    }
+
+    std.debug.print("Total rows updated in batch: {}\n", .{total_changes});
+}
+
+// Query and display all users with their updated information
+fn queryAllUsers(db: ?*c.sqlite3) !void {
+    const query_sql = "SELECT id, name, email FROM users ORDER BY id";
+    var buf: [256]u8 = undefined;
+    const sql_cstr = createCString(&buf, query_sql);
+
+    var stmt: ?*c.sqlite3_stmt = null;
+    const rc = c.sqlite3_prepare_v2(db, sql_cstr, -1, &stmt, null);
+
+    if (rc != c.SQLITE_OK) {
+        std.debug.print("Failed to prepare user query: {s}\n", .{c.sqlite3_errmsg(db)});
+        return error.QueryError;
+    }
+    defer _ = c.sqlite3_finalize(stmt);
+
+    std.debug.print("\n=== All Users ===\n", .{});
+    std.debug.print("ID | Name | Email\n", .{});
+    std.debug.print("---|------|------\n", .{});
+
+    while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+        const id = c.sqlite3_column_int(stmt, 0);
+        const name = c.sqlite3_column_text(stmt, 1);
+        const email_type = c.sqlite3_column_type(stmt, 2);
+        
+        if (email_type == c.SQLITE_NULL) {
+            std.debug.print("{} | {s} | NULL\n", .{ id, name });
+        } else {
+            const email = c.sqlite3_column_text(stmt, 2);
+            std.debug.print("{} | {s} | {s}\n", .{ id, name, email });
+        }
+    }
+    std.debug.print("================\n\n", .{});
+}
+
 pub fn main() !void {
-    std.debug.print("zsqlite Phase 3 Demo - Transaction Management\n", .{});
-    std.debug.print("=============================================\n\n", .{});
+    std.debug.print("zsqlite Phase 4 Demo - Advanced Querying\n", .{});
+    std.debug.print("========================================\n\n", .{});
 
     // Open database
     var db: ?*c.sqlite3 = null;
@@ -530,10 +733,24 @@ pub fn main() !void {
     const after_nested = try countUsers(db);
     std.debug.print("Users added in nested demo: {}\n", .{after_nested - before_nested});
 
-    std.debug.print("Phase 3 Demo completed successfully!\n", .{});
-    std.debug.print("All transaction management functions demonstrated:\n", .{});
-    std.debug.print("✓ sqlite3_get_autocommit() - Check autocommit status\n", .{});
-    std.debug.print("✓ BEGIN TRANSACTION, COMMIT, ROLLBACK\n", .{});
-    std.debug.print("✓ SAVEPOINT, RELEASE SAVEPOINT, ROLLBACK TO SAVEPOINT\n", .{});
-    std.debug.print("✓ sqlite3_changes(), sqlite3_total_changes(), sqlite3_last_insert_rowid()\n", .{});
+    // === Phase 4: Advanced Querying Demo ===
+    std.debug.print("\n=== Phase 4: Advanced Querying Demo ===\n", .{});
+
+    std.debug.print("\n--- Demo 1: Prepared Statement Reuse ---\n", .{});
+    try demonstrateStatementReuse(db);
+
+    std.debug.print("\n--- Demo 2: Batch Operations ---\n", .{});
+    try demonstrateBatchOperations(db);
+
+    std.debug.print("\n--- Demo 3: Final User Query ---\n", .{});
+    try queryAllUsers(db);
+
+    std.debug.print("Phase 4 Demo completed successfully!\n", .{});
+    std.debug.print("All advanced querying functions demonstrated:\n", .{});
+    std.debug.print("✓ sqlite3_reset() - Reset prepared statement for reuse\n", .{});
+    std.debug.print("✓ sqlite3_clear_bindings() - Clear bound parameters\n", .{});
+    std.debug.print("✓ sqlite3_sql() - Get original SQL text\n", .{});
+    std.debug.print("✓ Statement reuse for batch operations\n", .{});
+    std.debug.print("✓ Efficient parameter binding and rebinding\n", .{});
+
 }
