@@ -1,0 +1,27 @@
+# Zig build artifacts
+zig-cache/
+zig-out/
+.zig-cache/
+
+# Local database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test files
+test_*.db
+example.db
+
+# Logs
+*.log
