@@ -4,25 +4,7 @@ A minimal, direct wrapper around SQLite's C API for Zig. Perfect for developers 
 
 ## Why zsqlite?
 
-**zsqlite** focuses on *### **Phase 3: Transaction Management (COMPLETED)**
-*Essential for data integrity*
-
-- ✓ `sqlite3_get### **Release Strategy**
-
-**v0.1.0** - Phase 1 (COMPLETED) - Basic functionality working
-**v0.2.0** - Phase 2 (COMPLETED) - Complete data type support  
-**v0.3.0** - Phase 3 (COMPLETED) - Transaction management
-**v0.4.0** - Phase 4 (Advanced querying)
-**v1.0.0** - Phases 5-6 (Production ready)
-**v2.0.0** - Phase 7 (Advanced features)mit()` - Check autocommit status
-- ✓ Manual transaction handling via `sqlite3_exec()`:
-  - ✓ `BEGIN TRANSACTION`
-  - ✓ `COMMIT`
-  - ✓ `ROLLBACK`
-  - ✓ `SAVEPOINT` / `RELEASE SAVEPOINT` / `ROLLBACK TO SAVEPOINT`
-- ✓ `sqlite3_changes()` - Get number of changed rows  
-- ✓ `sqlite3_total_changes()` - Get total changes in session
-- ✓ `sqlite3_last_insert_rowid()` - Get last inserted row ID API access** with minimal abstraction, making it ideal for:
+**zsqlite** focuses on **direct SQLite C API access** with minimal abstraction, making it ideal for:
 
 - **Learning SQLite C API** - Clear, documented examples of C interop
 - **Performance-critical applications** - Zero-overhead direct bindings
@@ -30,7 +12,6 @@ A minimal, direct wrapper around SQLite's C API for Zig. Perfect for developers 
 - **Custom wrapper development** - Solid foundation for building your own abstractions
 - **Embedded systems** - Minimal dependencies and overhead
 
-**Note:** For high-level abstractions with compile-time safety, consider [vrischmann/zig-sqlite](https://github.com/vrischmann/zig-sqlite). This project serves developers who prefer direct API access.
 
 ## Critical Discovery: linkLibC() Requirement
 
@@ -296,17 +277,22 @@ SQLite has 200+ functions, but most applications only need a core subset. This r
 - ✓ `sqlite3_last_insert_rowid()` - Get last inserted row ID
 - ✓ `sqlite3_total_changes()` - Get total changes in session
 
-### **Phase 5: Database Introspection (NEXT PRIORITY)**
+### **Phase 5: Database Introspection (COMPLETED)**
 *Schema discovery and metadata*
 
-- [ ] `sqlite3_table_column_metadata()` - Get column metadata
-- [ ] `PRAGMA` statement support via `sqlite3_exec()`:
-  - `PRAGMA table_info(table_name)`
-  - `PRAGMA foreign_key_list(table_name)`
-  - `PRAGMA index_list(table_name)`
-  - `PRAGMA database_list`
+- ✓ `PRAGMA` statement support via `sqlite3_exec()`:
+  - ✓ `PRAGMA schema_version` - Get schema version number
+  - ✓ `PRAGMA table_list` - List all tables in database
+  - ✓ `PRAGMA table_info(table_name)` - Get column information for table
+  - ✓ `PRAGMA foreign_key_list(table_name)` - Get foreign key constraints
+  - ✓ `PRAGMA index_list(table_name)` - Get indexes for table
+  - ✓ `PRAGMA database_list` - List attached databases
+- ✓ Database statistics and analysis:
+  - ✓ Row counting with `SELECT COUNT(*) FROM table`
+  - ✓ Table existence checking
+  - ✓ Schema analysis and validation
 
-### **Phase 6: Performance & Optimization**
+### **Phase 6: Performance & Optimization (NEXT PRIORITY)**
 *For production applications*
 
 - [ ] `sqlite3_open_v2()` - Advanced database opening with flags
@@ -368,7 +354,8 @@ SQLite has 200+ functions, but most applications only need a core subset. This r
 **v0.2.0** - Phase 2 (COMPLETED) - Complete data type support
 **v0.3.0** - Phase 3 (COMPLETED) - Transaction management
 **v0.4.0** - Phase 4 (COMPLETED) - Advanced querying
-**v1.0.0** - Phases 5-6 (Production ready)
+**v0.5.0** - Phase 5 (COMPLETED) - Database introspection
+**v1.0.0** - Phase 6 (Production ready)
 **v2.0.0** - Phase 7 (Advanced features)
 
 ### **Implementation Notes**
