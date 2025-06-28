@@ -958,9 +958,193 @@ fn demonstrateConnectionFlags() !void {
     }
 }
 
+// === Phase 7: Advanced Features Functions ===
+
+// Database backup and recovery functions
+fn backupDatabase(source_db: ?*c.sqlite3, dest_filename: []const u8) !void {
+    std.debug.print("\n--- Starting Database Backup ---\n", .{});
+
+    // Open destination database
+    var dest_db: ?*c.sqlite3 = null;
+    var buf: [256]u8 = undefined;
+    const dest_cstr = createCString(&buf, dest_filename);
+
+    var rc = c.sqlite3_open(dest_cstr, &dest_db);
+    if (rc != c.SQLITE_OK) {
+        std.debug.print("Failed to open destination database: {s}\n", .{c.sqlite3_errmsg(dest_db)});
+        return error.OpenFailed;
+    }
+    defer _ = c.sqlite3_close(dest_db);
+
+    // Initialize backup
+    const backup = c.sqlite3_backup_init(dest_db, "main", source_db, "main");
+    if (backup == null) {
+        std.debug.print("Failed to initialize backup: {s}\n", .{c.sqlite3_errmsg(dest_db)});
+        return error.BackupInitFailed;
+    }
+    defer _ = c.sqlite3_backup_finish(backup);
+
+    // Perform backup in steps
+    var total_pages: c_int = 0;
+    var step: u32 = 0;
+    while (true) {
+        step += 1;
+        rc = c.sqlite3_backup_step(backup, 5); // Backup 5 pages at a time
+
+        const remaining = c.sqlite3_backup_remaining(backup);
+        const pagecount = c.sqlite3_backup_pagecount(backup);
+
+        if (step == 1) {
+            total_pages = pagecount;
+            std.debug.print("Total pages to backup: {}\n", .{total_pages});
+        }
+
+        std.debug.print("Step {}: {} pages remaining\n", .{ step, remaining });
+
+        if (rc == c.SQLITE_DONE) {
+            std.debug.print("✓ Backup completed successfully\n", .{});
+            break;
+        } else if (rc == c.SQLITE_OK or rc == c.SQLITE_BUSY or rc == c.SQLITE_LOCKED) {
+            // Wait a bit before next step
+            std.time.sleep(10 * std.time.ns_per_ms);
+            continue;
+        } else {
+            std.debug.print("Backup failed: {s}\n", .{c.sqlite3_errmsg(dest_db)});
+            return error.BackupFailed;
+        }
+    }
+}
+
+// WAL mode checkpoint functions
+fn performWALCheckpoint(db: ?*c.sqlite3) !void {
+    std.debug.print("\n--- WAL Checkpoint Operations ---\n", .{});
+
+    // Enable WAL mode first
+    try executeSQL(db, "PRAGMA journal_mode = WAL");
+    std.debug.print("✓ WAL mode enabled\n", .{});
+
+    // Perform full checkpoint
+    var wal_pages: c_int = 0;
+    var checkpointed_pages: c_int = 0;
+
+    const rc = c.sqlite3_wal_checkpoint_v2(db, null, c.SQLITE_CHECKPOINT_FULL, &wal_pages, &checkpointed_pages);
+
+    if (rc == c.SQLITE_OK) {
+        std.debug.print("✓ WAL checkpoint completed\n", .{});
+        std.debug.print("  WAL pages: {}\n", .{wal_pages});
+        std.debug.print("  Checkpointed pages: {}\n", .{checkpointed_pages});
+    } else {
+        std.debug.print("WAL checkpoint failed: {s}\n", .{c.sqlite3_errmsg(db)});
+        return error.CheckpointFailed;
+    }
+
+    // Set automatic checkpoint
+    const auto_rc = c.sqlite3_wal_autocheckpoint(db, 1000); // Checkpoint every 1000 pages
+    if (auto_rc == c.SQLITE_OK) {
+        std.debug.print("✓ Auto-checkpoint set to 1000 pages\n", .{});
+    } else {
+        std.debug.print("Failed to set auto-checkpoint: {s}\n", .{c.sqlite3_errmsg(db)});
+    }
+}
+
+// User-defined function example
+fn customSqlFunction(ctx: ?*c.sqlite3_context, argc: c_int, argv: [*c]?*c.sqlite3_value) callconv(.c) void {
+    _ = argc; // We expect exactly 2 arguments, but this function signature requires the parameter
+
+    // Get the two arguments
+    const arg1 = c.sqlite3_value_int(argv[0]);
+    const arg2 = c.sqlite3_value_int(argv[1]);
+
+    // Calculate result (simple addition with multiplication)
+    const result = (arg1 + arg2) * 2;
+
+    // Return the result
+    c.sqlite3_result_int(ctx, result);
+}
+
+fn registerCustomFunctions(db: ?*c.sqlite3) !void {
+    std.debug.print("\n--- Registering Custom Functions ---\n", .{});
+
+    // Register a custom function: CUSTOM_MATH(a, b) returns (a + b) * 2
+    const rc = c.sqlite3_create_function(db, "CUSTOM_MATH", // Function name
+        2, // Number of arguments
+        c.SQLITE_UTF8, // Text encoding
+        null, // User data pointer
+        customSqlFunction, // Function implementation
+        null, // Step function (for aggregates)
+        null // Final function (for aggregates)
+    );
+
+    if (rc == c.SQLITE_OK) {
+        std.debug.print("✓ Custom function 'CUSTOM_MATH' registered\n", .{});
+    } else {
+        std.debug.print("Failed to register custom function: {s}\n", .{c.sqlite3_errmsg(db)});
+        return error.FunctionRegistrationFailed;
+    }
+}
+
+fn testCustomFunction(db: ?*c.sqlite3) !void {
+    std.debug.print("\n--- Testing Custom Function ---\n", .{});
+
+    // Test the custom function
+    const test_sql = "SELECT CUSTOM_MATH(5, 10) as result";
+    var buf: [256]u8 = undefined;
+    const sql_cstr = createCString(&buf, test_sql);
+
+    var stmt: ?*c.sqlite3_stmt = null;
+    var rc = c.sqlite3_prepare_v2(db, sql_cstr, -1, &stmt, null);
+    if (rc != c.SQLITE_OK) {
+        std.debug.print("Failed to prepare function test: {s}\n", .{c.sqlite3_errmsg(db)});
+        return error.PrepareError;
+    }
+    defer _ = c.sqlite3_finalize(stmt);
+
+    rc = c.sqlite3_step(stmt);
+    if (rc == c.SQLITE_ROW) {
+        const result = c.sqlite3_column_int(stmt, 0);
+        std.debug.print("✓ CUSTOM_MATH(5, 10) = {} (expected: 30)\n", .{result});
+
+        if (result == 30) {
+            std.debug.print("✓ Custom function working correctly!\n", .{});
+        } else {
+            std.debug.print("✗ Custom function returned unexpected result\n", .{});
+        }
+    } else {
+        std.debug.print("Failed to execute function test: {s}\n", .{c.sqlite3_errmsg(db)});
+        return error.ExecuteError;
+    }
+}
+
+// Advanced database operations demo
+fn demonstrateAdvancedFeatures(db: ?*c.sqlite3) !void {
+    std.debug.print("\n=== Phase 7: Advanced Features Demo ===\n", .{});
+
+    // 1. Register and test custom functions
+    try registerCustomFunctions(db);
+    try testCustomFunction(db);
+
+    // 2. Demonstrate WAL mode and checkpointing
+    try performWALCheckpoint(db);
+
+    // 3. Create some test data for backup
+    try executeSQL(db, "CREATE TABLE IF NOT EXISTS backup_test (id INTEGER, data TEXT)");
+    try executeSQL(db, "INSERT INTO backup_test VALUES (1, 'Important data 1')");
+    try executeSQL(db, "INSERT INTO backup_test VALUES (2, 'Important data 2')");
+    try executeSQL(db, "INSERT INTO backup_test VALUES (3, 'Important data 3')");
+    std.debug.print("✓ Created test data for backup\n", .{});
+
+    // 4. Demonstrate database backup
+    backupDatabase(db, "backup_demo.db") catch |err| {
+        std.debug.print("Backup demonstration failed: {}\n", .{err});
+        // Continue with other demos
+    };
+
+    std.debug.print("✓ Advanced features demonstration completed\n", .{});
+}
+
 // === Summary ===
 pub fn main() !void {
-    std.debug.print("zsqlite Complete Demo - Phases 1-6\n", .{});
+    std.debug.print("zsqlite Complete Demo - Phases 1-7\n", .{});
     std.debug.print("==================================\n\n", .{});
 
     // Open database
@@ -1143,6 +1327,9 @@ pub fn main() !void {
         std.debug.print("Performance test failed: {}\n", .{err});
     };
 
+    // === Phase 7: Advanced Features ===
+    try demonstrateAdvancedFeatures(db);
+
     // === Summary ===
     std.debug.print("\n" ++ "=" ** 50 ++ "\n", .{});
     std.debug.print("🎉 Complete zsqlite Demo Finished Successfully!\n", .{});
@@ -1153,5 +1340,6 @@ pub fn main() !void {
     std.debug.print("✅ Phase 4: Advanced querying\n", .{});
     std.debug.print("✅ Phase 5: Database introspection\n", .{});
     std.debug.print("✅ Phase 6: Performance & optimization\n", .{});
+    std.debug.print("✅ Phase 7: Advanced features (backup, WAL, custom functions)\n", .{});
     std.debug.print("\nAll 30+ functions working perfectly! 🚀\n", .{});
 }
