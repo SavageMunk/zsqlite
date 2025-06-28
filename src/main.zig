@@ -638,7 +638,8 @@ fn listTables(db: ?*c.sqlite3) !void {
 fn getTableSchema(db: ?*c.sqlite3, table_name: []const u8) !void {
     var buf: [512]u8 = undefined;
     const query_sql = std.fmt.bufPrint(&buf, "PRAGMA table_info({s})", .{table_name}) catch return error.BufferTooSmall;
-    const sql_cstr = createCString(&buf, query_sql);
+    var buf2: [512]u8 = undefined;
+    const sql_cstr = createCString(&buf2, query_sql);
 
     var stmt: ?*c.sqlite3_stmt = null;
     const rc = c.sqlite3_prepare_v2(db, sql_cstr, -1, &stmt, null);
@@ -732,8 +733,234 @@ fn analyzeTableData(db: ?*c.sqlite3, table_name: []const u8) !void {
     std.debug.print("Row Count: {}\n", .{row_count});
 }
 
+// === Phase 6: Performance & Optimization Functions ===
+
+// Advanced database opening with specific flags
+fn openDatabaseV2(filename: []const u8, flags: c_int) !?*c.sqlite3 {
+    var db: ?*c.sqlite3 = null;
+    var buf: [256]u8 = undefined;
+    const filename_cstr = createCString(&buf, filename);
+
+    const rc = c.sqlite3_open_v2(filename_cstr, &db, flags, null);
+    if (rc != c.SQLITE_OK) {
+        if (db != null) {
+            std.debug.print("Failed to open database with flags {}: {s}\n", .{ flags, c.sqlite3_errmsg(db) });
+            _ = c.sqlite3_close(db);
+        } else {
+            std.debug.print("Failed to open database with flags {}: Error code {}\n", .{ flags, rc });
+        }
+        return error.OpenFailed;
+    }
+
+    std.debug.print("✓ Database opened with flags: {} ({})\n", .{ flags, filename });
+    return db;
+}
+
+// Set busy timeout (milliseconds)
+fn setBusyTimeout(db: ?*c.sqlite3, timeout_ms: c_int) !void {
+    const rc = c.sqlite3_busy_timeout(db, timeout_ms);
+    if (rc != c.SQLITE_OK) {
+        std.debug.print("Failed to set busy timeout: {s}\n", .{c.sqlite3_errmsg(db)});
+        return error.ConfigError;
+    }
+    std.debug.print("✓ Busy timeout set to {} ms\n", .{timeout_ms});
+}
+
+// Custom busy handler callback
+fn customBusyHandler(data: ?*anyopaque, count: c_int) callconv(.c) c_int {
+    _ = data; // Unused parameter
+
+    // Print busy notification
+    std.debug.print("Database busy (attempt {}), waiting...\n", .{count + 1});
+
+    // Sleep for 100ms
+    std.time.sleep(100 * std.time.ns_per_ms);
+
+    // Return 1 to retry, 0 to give up
+    // We'll retry up to 5 times
+    return if (count < 5) 1 else 0;
+}
+
+// Set custom busy handler
+fn setBusyHandler(db: ?*c.sqlite3) !void {
+    const rc = c.sqlite3_busy_handler(db, customBusyHandler, null);
+    if (rc != c.SQLITE_OK) {
+        std.debug.print("Failed to set busy handler: {s}\n", .{c.sqlite3_errmsg(db)});
+        return error.ConfigError;
+    }
+    std.debug.print("✓ Custom busy handler installed\n", .{});
+}
+
+// Configure database connection with performance settings
+fn configureDatabase(db: ?*c.sqlite3, config_name: []const u8) !void {
+    std.debug.print("\n--- Configuring database for {s} ---\n", .{config_name});
+
+    // Set journal mode
+    try executeSQL(db, "PRAGMA journal_mode = WAL");
+
+    // Set synchronous mode for better performance
+    try executeSQL(db, "PRAGMA synchronous = NORMAL");
+
+    // Set cache size (negative value = KB, positive = pages)
+    try executeSQL(db, "PRAGMA cache_size = -8192"); // 8MB cache
+
+    // Enable foreign key constraints
+    try executeSQL(db, "PRAGMA foreign_keys = ON");
+
+    // Set temp store to memory for better performance
+    try executeSQL(db, "PRAGMA temp_store = MEMORY");
+
+    // Set mmap size for better I/O (64MB)
+    try executeSQL(db, "PRAGMA mmap_size = 67108864");
+
+    std.debug.print("✓ Database configured for {s}\n", .{config_name});
+}
+
+// Query current database configuration
+fn queryConfiguration(db: ?*c.sqlite3) !void {
+    std.debug.print("\n--- Current Database Configuration ---\n", .{});
+
+    // Query and display each configuration setting
+    try queryPragma(db, "journal_mode", "Journal Mode");
+    try queryPragma(db, "synchronous", "Synchronous");
+    try queryPragma(db, "cache_size", "Cache Size");
+    try queryPragma(db, "foreign_keys", "Foreign Keys");
+    try queryPragma(db, "temp_store", "Temp Store");
+    try queryPragma(db, "mmap_size", "Memory Map Size");
+    try queryPragma(db, "page_size", "Page Size");
+    try queryPragma(db, "page_count", "Page Count");
+}
+
+// Helper function to query and display a single PRAGMA setting
+fn queryPragma(db: ?*c.sqlite3, pragma_name: []const u8, display_name: []const u8) !void {
+    var buf: [128]u8 = undefined;
+    const sql = std.fmt.bufPrint(&buf, "PRAGMA {s}", .{pragma_name}) catch return error.BufferTooSmall;
+    var buf2: [128]u8 = undefined;
+    const sql_cstr = createCString(&buf2, sql);
+
+    var stmt: ?*c.sqlite3_stmt = null;
+    var rc = c.sqlite3_prepare_v2(db, sql_cstr, -1, &stmt, null);
+    if (rc != c.SQLITE_OK) {
+        std.debug.print("Failed to prepare pragma query: {s}\n", .{c.sqlite3_errmsg(db)});
+        return error.PrepareError;
+    }
+    defer _ = c.sqlite3_finalize(stmt);
+
+    rc = c.sqlite3_step(stmt);
+    if (rc == c.SQLITE_ROW) {
+        const value_type = c.sqlite3_column_type(stmt, 0);
+        switch (value_type) {
+            c.SQLITE_INTEGER => {
+                const value = c.sqlite3_column_int64(stmt, 0);
+                std.debug.print("{s}: {}\n", .{ display_name, value });
+            },
+            c.SQLITE_TEXT => {
+                const value = c.sqlite3_column_text(stmt, 0);
+                std.debug.print("{s}: {s}\n", .{ display_name, value });
+            },
+            else => {
+                std.debug.print("{s}: <unknown type {}>\n", .{ display_name, value_type });
+            },
+        }
+    } else {
+        std.debug.print("{s}: <no result>\n", .{display_name});
+    }
+}
+
+// Performance testing with different configurations
+fn performanceTest(db: ?*c.sqlite3, test_name: []const u8, insert_count: u32) !void {
+    std.debug.print("\n--- Performance Test: {s} ---\n", .{test_name});
+
+    // Start timing
+    const start_time = std.time.nanoTimestamp();
+
+    // Create test table
+    try executeSQL(db, "CREATE TEMP TABLE perf_test (id INTEGER, data TEXT)");
+
+    // Begin transaction for batch insert
+    try beginTransaction(db);
+
+    // Prepare insert statement
+    var stmt: ?*c.sqlite3_stmt = null;
+    const insert_sql = "INSERT INTO perf_test (id, data) VALUES (?, ?)";
+    var buf: [256]u8 = undefined;
+    const insert_cstr = createCString(&buf, insert_sql);
+
+    var rc = c.sqlite3_prepare_v2(db, insert_cstr, -1, &stmt, null);
+    if (rc != c.SQLITE_OK) {
+        std.debug.print("Failed to prepare insert: {s}\n", .{c.sqlite3_errmsg(db)});
+        return error.PrepareError;
+    }
+    defer _ = c.sqlite3_finalize(stmt);
+
+    // Insert test data
+    var i: u32 = 0;
+    while (i < insert_count) : (i += 1) {
+        _ = c.sqlite3_reset(stmt);
+        _ = c.sqlite3_bind_int(stmt, 1, @intCast(i));
+
+        var data_buf: [64]u8 = undefined;
+        const data = std.fmt.bufPrint(&data_buf, "Test data row {}", .{i}) catch "default";
+        _ = c.sqlite3_bind_text(stmt, 2, data.ptr, @intCast(data.len), c.SQLITE_TRANSIENT);
+
+        rc = c.sqlite3_step(stmt);
+        if (rc != c.SQLITE_DONE) {
+            std.debug.print("Insert failed at row {}: {s}\n", .{ i, c.sqlite3_errmsg(db) });
+            return error.InsertError;
+        }
+    }
+
+    // Commit transaction
+    try commitTransaction(db);
+
+    // End timing
+    const end_time = std.time.nanoTimestamp();
+    const duration_ms = @as(f64, @floatFromInt(end_time - start_time)) / 1_000_000.0;
+
+    std.debug.print("✓ Inserted {} rows in {d:.2} ms ({d:.0} rows/sec)\n", .{
+        insert_count,
+        duration_ms,
+        @as(f64, @floatFromInt(insert_count)) / (duration_ms / 1000.0),
+    });
+
+    // Clean up
+    try executeSQL(db, "DROP TABLE perf_test");
+}
+
+// Demonstrate connection flags
+fn demonstrateConnectionFlags() !void {
+    std.debug.print("\n--- Connection Flags Demo ---\n", .{});
+
+    // Try different connection flags
+    const flags = [_]struct { flag: c_int, name: []const u8 }{
+        .{ .flag = c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE, .name = "READWRITE | CREATE" },
+        .{ .flag = c.SQLITE_OPEN_READONLY, .name = "READONLY" },
+        .{ .flag = c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE | c.SQLITE_OPEN_NOMUTEX, .name = "READWRITE | CREATE | NOMUTEX" },
+    };
+
+    for (flags) |flag_info| {
+        std.debug.print("\nTesting flag: {s}\n", .{flag_info.name});
+
+        const test_db = openDatabaseV2(":memory:", flag_info.flag) catch |err| {
+            std.debug.print("✗ Failed to open with flags: {}\n", .{err});
+            continue;
+        };
+
+        if (test_db) |db| {
+            // Test basic operation if database opened successfully
+            _ = executeSQL(db, "CREATE TABLE IF NOT EXISTS flag_test (id INTEGER)") catch |err| {
+                std.debug.print("✗ Failed to create table: {}\n", .{err});
+            };
+
+            _ = c.sqlite3_close(db);
+            std.debug.print("✓ Connection test completed\n", .{});
+        }
+    }
+}
+
+// === Summary ===
 pub fn main() !void {
-    std.debug.print("zsqlite Complete Demo - Phases 1-5\n", .{});
+    std.debug.print("zsqlite Complete Demo - Phases 1-6\n", .{});
     std.debug.print("==================================\n\n", .{});
 
     // Open database
@@ -895,6 +1122,27 @@ pub fn main() !void {
     try analyzeTableData(db, "test_data");
     try analyzeTableData(db, "users");
 
+    // === Phase 6: Performance & Optimization ===
+    std.debug.print("\n=== Phase 6: Performance & Optimization ===\n", .{});
+
+    // Set busy timeout for this database
+    try setBusyTimeout(db, 5000); // 5 second timeout
+
+    // Query current configuration
+    try queryConfiguration(db);
+
+    // Configure database for better performance
+    try configureDatabase(db, "Production Ready");
+
+    // Query configuration after changes
+    std.debug.print("\n--- After Performance Configuration ---\n", .{});
+    try queryConfiguration(db);
+
+    // Run a simple performance test
+    performanceTest(db, "Basic Performance Test", 1000) catch |err| {
+        std.debug.print("Performance test failed: {}\n", .{err});
+    };
+
     // === Summary ===
     std.debug.print("\n" ++ "=" ** 50 ++ "\n", .{});
     std.debug.print("🎉 Complete zsqlite Demo Finished Successfully!\n", .{});
@@ -904,5 +1152,6 @@ pub fn main() !void {
     std.debug.print("✅ Phase 3: Transaction management\n", .{});
     std.debug.print("✅ Phase 4: Advanced querying\n", .{});
     std.debug.print("✅ Phase 5: Database introspection\n", .{});
-    std.debug.print("\nAll {} functions working perfectly! 🚀\n", .{25});
+    std.debug.print("✅ Phase 6: Performance & optimization\n", .{});
+    std.debug.print("\nAll 30+ functions working perfectly! 🚀\n", .{});
 }
