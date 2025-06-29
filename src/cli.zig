@@ -2,6 +2,7 @@ const std = @import("std");
 const c = @cImport({
     @cInclude("sqlite3.h");
 });
+const test_module = @import("test.zig");
 
 const print = std.debug.print;
 const allocator = std.heap.page_allocator;
@@ -36,15 +37,42 @@ const CLIState = struct {
     in_transaction: bool = false,
     last_error: ?[]const u8 = null,
 
+    // Multiple database support
+    databases: std.HashMap([]const u8, *c.sqlite3, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
+    current_db_name: ?[]const u8 = null,
+
+    // CLI enhancement features
+    syntax_highlighting: bool = true,
+    show_query_time: bool = true,
+    result_format: ResultFormat = .table,
+
     fn init() CLIState {
-        return CLIState{};
+        return CLIState{
+            .databases = std.HashMap([]const u8, *c.sqlite3, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
+        };
     }
 
     fn deinit(self: *CLIState) void {
         if (self.db != null) {
             _ = c.sqlite3_close(self.db);
         }
+
+        // Close all databases
+        var iterator = self.databases.iterator();
+        while (iterator.next()) |entry| {
+            _ = c.sqlite3_close(entry.value_ptr.*);
+            allocator.free(entry.key_ptr.*);
+        }
+        self.databases.deinit();
     }
+};
+
+// Result formatting options
+const ResultFormat = enum {
+    table,
+    csv,
+    json,
+    vertical,
 };
 
 // Helper function to create null-terminated C string
@@ -89,14 +117,30 @@ fn executeSQL(state: *CLIState, sql: []const u8) !void {
         return;
     }
 
+    // Show highlighted SQL if enabled
+    if (state.syntax_highlighting) {
+        print("Executing: ", .{});
+        if (highlightSQL(allocator, sql)) |highlighted| {
+            defer allocator.free(highlighted);
+            print("{s}\n", .{highlighted});
+        } else |_| {
+            print("{s}\n", .{sql});
+        }
+    }
+
     var buf: [4096]u8 = undefined;
     const sql_cstr = createCString(&buf, sql);
 
     // Reset the callback state for each query
     callback_first_row = true;
 
+    // Time the query if enabled
+    const start_time = if (state.show_query_time) std.time.milliTimestamp() else 0;
+
     var errmsg: [*c]u8 = null;
     const rc = c.sqlite3_exec(state.db, sql_cstr, sqliteCallback, null, &errmsg);
+
+    const end_time = if (state.show_query_time) std.time.milliTimestamp() else 0;
 
     if (rc != c.SQLITE_OK) {
         defer if (errmsg != null) c.sqlite3_free(errmsg);
@@ -106,6 +150,12 @@ fn executeSQL(state: *CLIState, sql: []const u8) !void {
             print("SQL Error: {s}\n", .{std.mem.span(c.sqlite3_errmsg(state.db))});
         }
         return;
+    }
+
+    // Show query time if enabled
+    if (state.show_query_time) {
+        const duration = end_time - start_time;
+        print("Query executed in {d}ms\n", .{duration});
     }
 
     // Update transaction state
@@ -182,6 +232,31 @@ fn executeMetaCommand(state: *CLIState, command: []const u8) !void {
         // Import SQL file into database
         const filename = std.mem.trim(u8, command[8..], " ");
         try importSQLFile(state, filename);
+    } else if (std.mem.eql(u8, command, "\\config")) {
+        // Show current configuration
+        showConfig();
+    } else if (std.mem.startsWith(u8, command, "\\set ")) {
+        // Set configuration option
+        const setting = std.mem.trim(u8, command[5..], " ");
+        try setConfig(setting);
+    } else if (std.mem.startsWith(u8, command, "\\format ")) {
+        // Set result format
+        const format = std.mem.trim(u8, command[8..], " ");
+        try setResultFormat(state, format);
+    } else if (std.mem.startsWith(u8, command, "\\use ")) {
+        // Switch database connection (for multiple DB support)
+        const db_name = std.mem.trim(u8, command[5..], " ");
+        try useDatabase(state, db_name);
+    } else if (std.mem.eql(u8, command, "\\healthcheck") or std.mem.eql(u8, command, "\\health")) {
+        // Run database health check
+        try runHealthCheckCommand(state);
+    } else if (std.mem.startsWith(u8, command, "\\createhealthy ")) {
+        // Create a sample healthy database
+        const db_path = std.mem.trim(u8, command[14..], " ");
+        try createHealthyDatabaseCommand(db_path);
+    } else if (std.mem.eql(u8, command, "\\createhealthy")) {
+        print("Usage: \\createhealthy <database_path>\n", .{});
+        print("Creates a sample database that will always pass health checks.\n", .{});
     } else {
         print("Unknown meta command: {s}\n", .{command});
         print("Use \\h for help.\n", .{});
@@ -265,47 +340,6 @@ fn showStatus(state: *CLIState) void {
         print("Database: None\n", .{});
         print("Connection: Closed\n", .{});
     }
-    print("========================\n", .{});
-}
-
-// Show help
-fn showHelp() void {
-    print("=== ZSQLite CLI Help ===\n", .{});
-    print("\n", .{});
-    print("Meta Commands:\n", .{});
-    print("  \\o <file>        Open database file\n", .{});
-    print("  \\c               Close current database\n", .{});
-    print("  \\l               List tables and views\n", .{});
-    print("  \\d <table>       Describe table structure\n", .{});
-    print("  \\s               Show connection status\n", .{});
-    print("  \\schema          Show visual schema diagram\n", .{});
-    print("  \\export <file>   Export database to SQL file\n", .{});
-    print("  \\import <file>   Import SQL file into database\n", .{});
-    print("  \\h               Show this help\n", .{});
-    print("  \\q               Quit the CLI\n", .{});
-    print("\n", .{});
-    print("SQL Commands:\n", .{});
-    print("  Any valid SQLite SQL statement\n", .{});
-    print("  Examples:\n", .{});
-    print("    CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);\n", .{});
-    print("    INSERT INTO users (name) VALUES ('Alice');\n", .{});
-    print("    SELECT * FROM users;\n", .{});
-    print("    UPDATE users SET name = 'Bob' WHERE id = 1;\n", .{});
-    print("    DELETE FROM users WHERE id = 1;\n", .{});
-    print("\n", .{});
-    print("Transaction Commands:\n", .{});
-    print("    BEGIN;\n", .{});
-    print("    COMMIT;\n", .{});
-    print("    ROLLBACK;\n", .{});
-    print("\n", .{});
-    print("Export/Import Examples:\n", .{});
-    print("    \\export backup.sql     -- Export current database\n", .{});
-    print("    \\import data.sql       -- Import SQL statements\n", .{});
-    print("\n", .{});
-    print("Notes:\n", .{});
-    print("  - Commands can span multiple lines\n", .{});
-    print("  - Use semicolon to end SQL statements\n", .{});
-    print("  - Type 'exit' or 'quit' to exit\n", .{});
     print("========================\n", .{});
 }
 
@@ -629,6 +663,175 @@ fn importSQLFile(state: *CLIState, filename: []const u8) !void {
     print("Import complete: {d} statements processed, {d} errors\n", .{ count, errors });
 }
 
+// Configuration management
+const Config = struct {
+    syntax_highlighting: bool = true,
+    show_query_time: bool = true,
+    result_format: ResultFormat = .table,
+    prompt: []const u8 = "zsl> ",
+    continuation_prompt: []const u8 = "...> ",
+    max_history: usize = 1000,
+
+    const CONFIG_FILE = ".zslrc";
+
+    fn load() Config {
+        var config = Config{};
+
+        const file = std.fs.cwd().openFile(CONFIG_FILE, .{}) catch {
+            // Create default config file if it doesn't exist
+            config.save() catch {};
+            return config;
+        };
+        defer file.close();
+
+        const content = file.readToEndAlloc(allocator, 1024) catch return config;
+        defer allocator.free(content);
+
+        var lines = std.mem.splitSequence(u8, content, "\n");
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r\n");
+            if (trimmed.len == 0 or trimmed[0] == '#') continue;
+
+            if (std.mem.indexOf(u8, trimmed, "=")) |eq_pos| {
+                const key = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
+                const value = std.mem.trim(u8, trimmed[eq_pos + 1 ..], " \t");
+
+                if (std.mem.eql(u8, key, "syntax_highlighting")) {
+                    config.syntax_highlighting = std.mem.eql(u8, value, "true");
+                } else if (std.mem.eql(u8, key, "show_query_time")) {
+                    config.show_query_time = std.mem.eql(u8, value, "true");
+                } else if (std.mem.eql(u8, key, "result_format")) {
+                    if (std.mem.eql(u8, value, "csv")) config.result_format = .csv else if (std.mem.eql(u8, value, "json")) config.result_format = .json else if (std.mem.eql(u8, value, "vertical")) config.result_format = .vertical else config.result_format = .table;
+                } else if (std.mem.eql(u8, key, "prompt")) {
+                    config.prompt = allocator.dupe(u8, value) catch "zsl> ";
+                }
+            }
+        }
+
+        return config;
+    }
+
+    fn save(self: *const Config) !void {
+        const file = std.fs.cwd().createFile(CONFIG_FILE, .{}) catch return;
+        defer file.close();
+
+        const writer = file.writer();
+        try writer.print("# ZSQLite CLI Configuration\n", .{});
+        try writer.print("# Boolean values: true/false\n", .{});
+        try writer.print("# Result formats: table, csv, json, vertical\n\n", .{});
+        try writer.print("syntax_highlighting={s}\n", .{if (self.syntax_highlighting) "true" else "false"});
+        try writer.print("show_query_time={s}\n", .{if (self.show_query_time) "true" else "false"});
+        try writer.print("result_format={s}\n", .{@tagName(self.result_format)});
+        try writer.print("prompt={s}\n", .{self.prompt});
+    }
+};
+
+// SQL Syntax highlighting
+const SQLKeyword = struct {
+    pub fn isKeyword(word: []const u8) bool {
+        const keywords = [_][]const u8{ "SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "BEGIN", "COMMIT", "ROLLBACK", "FROM", "WHERE", "GROUP", "ORDER", "BY", "HAVING", "JOIN", "INNER", "LEFT", "RIGHT", "OUTER", "AND", "OR", "NOT", "IN", "LIKE", "BETWEEN", "IS", "NULL", "AS", "DISTINCT", "LIMIT", "OFFSET", "TABLE", "VIEW", "INDEX", "PRIMARY", "KEY", "FOREIGN", "REFERENCES", "CONSTRAINT", "UNIQUE", "INTEGER", "TEXT", "REAL", "BLOB", "VARCHAR", "CHAR", "BOOLEAN", "DATE", "DATETIME", "TIME", "IF", "EXISTS", "CASCADE", "RESTRICT" };
+
+        const upper_word = std.ascii.allocUpperString(allocator, word) catch return false;
+        defer allocator.free(upper_word);
+
+        for (keywords) |keyword| {
+            if (std.mem.eql(u8, upper_word, keyword)) {
+                return true;
+            }
+        }
+        return false;
+    }
+};
+
+// ANSI color codes for syntax highlighting
+const Colors = struct {
+    const reset = "\x1b[0m";
+    const bold = "\x1b[1m";
+    const red = "\x1b[31m";
+    const green = "\x1b[32m";
+    const yellow = "\x1b[33m";
+    const blue = "\x1b[34m";
+    const magenta = "\x1b[35m";
+    const cyan = "\x1b[36m";
+    const white = "\x1b[37m";
+    const gray = "\x1b[90m";
+};
+
+// Highlight SQL syntax with colors
+fn highlightSQL(allocator_param: std.mem.Allocator, sql: []const u8) ![]u8 {
+    var result = std.ArrayList(u8).init(allocator_param);
+    defer result.deinit();
+
+    var i: usize = 0;
+    while (i < sql.len) {
+        if (std.ascii.isAlphabetic(sql[i])) {
+            // Find word boundary
+            const start = i;
+            while (i < sql.len and (std.ascii.isAlphanumeric(sql[i]) or sql[i] == '_')) {
+                i += 1;
+            }
+            const word = sql[start..i];
+
+            // Check if it's a keyword
+            if (SQLKeyword.isKeyword(word)) {
+                try result.appendSlice(Colors.blue);
+                try result.appendSlice(Colors.bold);
+                try result.appendSlice(word);
+                try result.appendSlice(Colors.reset);
+            } else {
+                try result.appendSlice(word);
+            }
+        } else if (sql[i] == '\'' or sql[i] == '"') {
+            // String literal
+            const quote = sql[i];
+            try result.append(sql[i]);
+            i += 1;
+
+            try result.appendSlice(Colors.green);
+            while (i < sql.len and sql[i] != quote) {
+                if (sql[i] == '\\' and i + 1 < sql.len) {
+                    try result.append(sql[i]);
+                    i += 1;
+                    if (i < sql.len) {
+                        try result.append(sql[i]);
+                        i += 1;
+                    }
+                } else {
+                    try result.append(sql[i]);
+                    i += 1;
+                }
+            }
+            try result.appendSlice(Colors.reset);
+
+            if (i < sql.len) {
+                try result.append(sql[i]);
+                i += 1;
+            }
+        } else if (std.ascii.isDigit(sql[i])) {
+            // Numeric literal
+            try result.appendSlice(Colors.yellow);
+            while (i < sql.len and (std.ascii.isDigit(sql[i]) or sql[i] == '.')) {
+                try result.append(sql[i]);
+                i += 1;
+            }
+            try result.appendSlice(Colors.reset);
+        } else if (sql[i] == '-' and i + 1 < sql.len and sql[i + 1] == '-') {
+            // Comment
+            try result.appendSlice(Colors.gray);
+            while (i < sql.len and sql[i] != '\n') {
+                try result.append(sql[i]);
+                i += 1;
+            }
+            try result.appendSlice(Colors.reset);
+        } else {
+            try result.append(sql[i]);
+            i += 1;
+        }
+    }
+
+    return result.toOwnedSlice();
+}
+
 // Read input from stdin
 fn readInput(allocator_param: std.mem.Allocator, prompt: []const u8) !?[]u8 {
     print("{s}", .{prompt});
@@ -645,21 +848,216 @@ fn readInput(allocator_param: std.mem.Allocator, prompt: []const u8) !?[]u8 {
     }
 }
 
+// Show help
+fn showHelp() void {
+    print(
+        \\=== ZSQLite CLI Help ===
+        \\
+        \\Meta Commands:
+        \\  \\o <file>        Open database file
+        \\  \\c               Close current database
+        \\  \\l               List tables and views
+        \\  \\d <table>       Describe table structure
+        \\  \\s               Show connection status
+        \\  \\schema          Show visual schema diagram
+        \\  \\export <file>   Export database to SQL file
+        \\  \\import <file>   Import SQL file into database
+        \\  \\healthcheck     Run comprehensive database health check
+        \\  \\createhealthy <file> Create sample database that passes health checks
+        \\  \\config          Show current configuration
+        \\  \\set <key=value> Set configuration option
+        \\  \\format <type>   Set result format (table/csv/json/vertical)
+        \\  \\h               Show this help
+        \\  \\q               Quit the CLI
+        \\
+        \\SQL Commands:
+        \\  Any valid SQLite SQL statement
+        \\  Examples:
+        \\    CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);
+        \\    INSERT INTO users (name) VALUES ('Alice');
+        \\    SELECT * FROM users;
+        \\    UPDATE users SET name = 'Bob' WHERE id = 1;
+        \\    DELETE FROM users WHERE id = 1;
+        \\
+        \\Transaction Commands:
+        \\    BEGIN;
+        \\    COMMIT;
+        \\    ROLLBACK;
+        \\
+        \\Export/Import Examples:
+        \\    \\export backup.sql     -- Export current database
+        \\    \\import data.sql       -- Import SQL statements
+        \\
+        \\Configuration Examples:
+        \\    \\set syntax_highlighting=false
+        \\    \\set show_query_time=true
+        \\    \\format csv            -- Change output to CSV
+        \\    \\format table          -- Change output to table (default)
+        \\
+        \\Notes:
+        \\  - Commands can span multiple lines
+        \\  - Use semicolon to end SQL statements
+        \\  - Type 'exit' or 'quit' to exit
+        \\  - Configuration is saved in .zslrc
+        \\========================
+        \\
+    , .{});
+}
+
+// Show current configuration
+fn showConfig() void {
+    const config = Config.load();
+    print("=== ZSQLite CLI Configuration ===\n", .{});
+    print("Syntax highlighting: {s}\n", .{if (config.syntax_highlighting) "enabled" else "disabled"});
+    print("Show query time: {s}\n", .{if (config.show_query_time) "enabled" else "disabled"});
+    print("Result format: {s}\n", .{@tagName(config.result_format)});
+    print("Prompt: {s}\n", .{config.prompt});
+    print("Max history: {d}\n", .{config.max_history});
+    print("Config file: {s}\n", .{Config.CONFIG_FILE});
+    print("===============================\n", .{});
+}
+
+// Set configuration option
+fn setConfig(setting: []const u8) !void {
+    if (std.mem.indexOf(u8, setting, "=")) |eq_pos| {
+        const key = std.mem.trim(u8, setting[0..eq_pos], " \t");
+        const value = std.mem.trim(u8, setting[eq_pos + 1 ..], " \t");
+
+        var config = Config.load();
+
+        if (std.mem.eql(u8, key, "syntax_highlighting")) {
+            config.syntax_highlighting = std.mem.eql(u8, value, "true");
+            print("Syntax highlighting: {s}\n", .{if (config.syntax_highlighting) "enabled" else "disabled"});
+        } else if (std.mem.eql(u8, key, "show_query_time")) {
+            config.show_query_time = std.mem.eql(u8, value, "true");
+            print("Show query time: {s}\n", .{if (config.show_query_time) "enabled" else "disabled"});
+        } else if (std.mem.eql(u8, key, "prompt")) {
+            // Free old prompt if it was allocated
+            config.prompt = try allocator.dupe(u8, value);
+            print("Prompt set to: {s}\n", .{config.prompt});
+        } else {
+            print("Unknown configuration key: {s}\n", .{key});
+            print("Available keys: syntax_highlighting, show_query_time, prompt\n", .{});
+            return;
+        }
+
+        try config.save();
+        print("Configuration saved to {s}\n", .{Config.CONFIG_FILE});
+    } else {
+        print("Invalid setting format. Use: \\set key=value\n", .{});
+        print("Example: \\set syntax_highlighting=true\n", .{});
+    }
+}
+
+// Set result format
+fn setResultFormat(state: *CLIState, format: []const u8) !void {
+    if (std.mem.eql(u8, format, "table")) {
+        state.result_format = .table;
+    } else if (std.mem.eql(u8, format, "csv")) {
+        state.result_format = .csv;
+    } else if (std.mem.eql(u8, format, "json")) {
+        state.result_format = .json;
+    } else if (std.mem.eql(u8, format, "vertical")) {
+        state.result_format = .vertical;
+    } else {
+        print("Invalid format: {s}\n", .{format});
+        print("Available formats: table, csv, json, vertical\n", .{});
+        return;
+    }
+
+    print("Result format set to: {s}\n", .{format});
+
+    // Save to config
+    var config = Config.load();
+    config.result_format = state.result_format;
+    try config.save();
+}
+
+// Use/switch database (multiple database support)
+fn useDatabase(state: *CLIState, db_name: []const u8) !void {
+    if (state.databases.get(db_name)) |db| {
+        state.db = db;
+        state.current_db_name = db_name;
+        print("Switched to database: {s}\n", .{db_name});
+    } else {
+        print("Database '{s}' not found. Use \\o <file> to open a database first.\n", .{db_name});
+        print("Available databases:\n", .{});
+        var iterator = state.databases.iterator();
+        var count: u32 = 0;
+        while (iterator.next()) |entry| {
+            print("  - {s}\n", .{entry.key_ptr.*});
+            count += 1;
+        }
+        if (count == 0) {
+            print("  (none)\n", .{});
+        }
+    }
+}
+
+// Run database health check command
+fn runHealthCheckCommand(state: *CLIState) !void {
+    if (state.db == null) {
+        print("No database connection. Use \\o <filename> to open a database first.\n", .{});
+        return;
+    }
+
+    const db_path = if (state.current_file) |file| file else ":memory:";
+    print("Running health check on: {s}\n\n", .{db_path});
+
+    var result = test_module.performDatabaseHealthCheck(db_path, allocator) catch |err| {
+        print("❌ Health check failed: {}\n", .{err});
+        return;
+    };
+    defer result.deinit();
+
+    // The health check function already prints detailed results
+    // Just add a summary here for CLI users
+    print("Health check completed. Database status: ", .{});
+    switch (result.overall_status) {
+        .healthy => print("🟢 HEALTHY\n", .{}),
+        .warning => print("🟡 WARNING - Check warnings above\n", .{}),
+        .critical => print("🔴 CRITICAL - Check errors above\n", .{}),
+    }
+}
+
+// Create sample healthy database command
+fn createHealthyDatabaseCommand(db_path: []const u8) !void {
+    print("Creating sample healthy database: {s}\n\n", .{db_path});
+
+    test_module.createSampleHealthyDatabase(db_path, allocator) catch |err| {
+        print("❌ Failed to create healthy database: {}\n", .{err});
+        return;
+    };
+
+    print("\n✅ Sample healthy database created successfully!\n", .{});
+    print("You can now:\n", .{});
+    print("  1. Open it with: \\o {s}\n", .{db_path});
+    print("  2. Run health check: \\healthcheck\n", .{});
+    print("  3. Explore the schema: \\d\n", .{});
+    print("  4. Query the data: SELECT * FROM users;\n", .{});
+}
+
 // Main CLI loop
 pub fn runCLI() !void {
     var state = CLIState.init();
     defer state.deinit();
 
-    print("ZSQLite CLI v0.8.0 - Direct SQLite3 bindings for Zig\n", .{});
+    print("ZSQLite CLI v0.9.1 - Direct SQLite3 bindings for Zig\n", .{});
     print("Type \\h for help, \\q to quit.\n\n", .{});
 
     // Try to open default database (in-memory)
     try openDatabase(&state, ":memory:");
 
-    while (true) {
-        const prompt = if (state.in_transaction) "zsl(tx)> " else "zsl> ";
+    // Load configuration
+    const config = Config.load();
+    state.syntax_highlighting = config.syntax_highlighting;
+    state.show_query_time = config.show_query_time;
+    state.result_format = config.result_format;
 
-        if (try readInput(allocator, prompt)) |input| {
+    while (true) {
+        const current_prompt = if (state.in_transaction) "zsl(tx)> " else config.prompt;
+
+        if (try readInput(allocator, current_prompt)) |input| {
             defer allocator.free(input);
 
             if (input.len == 0) continue;

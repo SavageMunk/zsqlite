@@ -36,3 +36,13 @@ example.db
 
 # Logs
 *.log
+# Generated files
+*.db
+*.zslrc
+*.sql
+cli
+grep
+
+# Build artifacts  
+.zig-cache/
+zig-out/
