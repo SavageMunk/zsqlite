@@ -1,6 +1,8 @@
 const std = @import("std");
 const c = @cImport({
     @cInclude("sqlite3.h");
+    @cInclude("termios.h");
+    @cInclude("unistd.h");
 });
 const test_module = @import("test.zig");
 
@@ -110,6 +112,73 @@ fn parseCommand(input: []const u8) Command {
     return Command{ .type = .sql, .content = trimmed };
 }
 
+// MySQL to SQLite command translation
+fn translateMySQLCommand(alloc: std.mem.Allocator, sql: []const u8) ![]const u8 {
+    const trimmed = std.mem.trim(u8, sql, " \t\n\r;");
+    const upper = try std.ascii.allocUpperString(alloc, trimmed);
+    defer alloc.free(upper);
+
+    // SHOW TABLES -> SELECT name FROM sqlite_master WHERE type='table'
+    if (std.mem.eql(u8, upper, "SHOW TABLES")) {
+        return try alloc.dupe(u8, "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name");
+    }
+
+    // SHOW DATABASES -> Not applicable in SQLite, but we can show attached databases
+    if (std.mem.eql(u8, upper, "SHOW DATABASES")) {
+        return try alloc.dupe(u8, "PRAGMA database_list");
+    }
+
+    // DESCRIBE table_name -> PRAGMA table_info(table_name)
+    if (std.mem.startsWith(u8, upper, "DESCRIBE ")) {
+        const table_name = std.mem.trim(u8, trimmed[9..], " \t\n\r;");
+        return try std.fmt.allocPrint(alloc, "PRAGMA table_info({s})", .{table_name});
+    }
+    if (std.mem.startsWith(u8, upper, "DESC ")) {
+        const table_name = std.mem.trim(u8, trimmed[5..], " \t\n\r;");
+        return try std.fmt.allocPrint(alloc, "PRAGMA table_info({s})", .{table_name});
+    }
+
+    // SHOW COLUMNS FROM table_name -> PRAGMA table_info(table_name)
+    if (std.mem.startsWith(u8, upper, "SHOW COLUMNS FROM ")) {
+        const table_name = std.mem.trim(u8, trimmed[18..], " \t\n\r;");
+        return try std.fmt.allocPrint(alloc, "PRAGMA table_info({s})", .{table_name});
+    }
+
+    // SHOW INDEX FROM table_name -> PRAGMA index_list(table_name)
+    if (std.mem.startsWith(u8, upper, "SHOW INDEX FROM ")) {
+        const table_name = std.mem.trim(u8, trimmed[16..], " \t\n\r;");
+        return try std.fmt.allocPrint(alloc, "PRAGMA index_list({s})", .{table_name});
+    }
+    if (std.mem.startsWith(u8, upper, "SHOW INDEXES FROM ")) {
+        const table_name = std.mem.trim(u8, trimmed[18..], " \t\n\r;");
+        return try std.fmt.allocPrint(alloc, "PRAGMA index_list({s})", .{table_name});
+    }
+
+    // SHOW CREATE TABLE table_name -> SELECT sql FROM sqlite_master WHERE name='table_name'
+    if (std.mem.startsWith(u8, upper, "SHOW CREATE TABLE ")) {
+        const table_name = std.mem.trim(u8, trimmed[18..], " \t\n\r;");
+        return try std.fmt.allocPrint(alloc, "SELECT sql FROM sqlite_master WHERE name='{s}' AND type='table'", .{table_name});
+    }
+
+    // SHOW VARIABLES -> PRAGMA compile_options (closest equivalent)
+    if (std.mem.eql(u8, upper, "SHOW VARIABLES")) {
+        return try alloc.dupe(u8, "PRAGMA compile_options");
+    }
+
+    // SHOW STATUS -> Show various SQLite status information
+    if (std.mem.eql(u8, upper, "SHOW STATUS")) {
+        return try alloc.dupe(u8, "SELECT 'database_size' as Variable_name, page_count * page_size as Value FROM pragma_page_count(), pragma_page_size() UNION ALL SELECT 'page_size', page_size FROM pragma_page_size() UNION ALL SELECT 'page_count', page_count FROM pragma_page_count()");
+    }
+
+    // SHOW PROCESSLIST -> Not applicable in SQLite
+    if (std.mem.eql(u8, upper, "SHOW PROCESSLIST")) {
+        return try alloc.dupe(u8, "SELECT 'SQLite does not support process lists' as message");
+    }
+
+    // No translation needed - return original
+    return try alloc.dupe(u8, sql);
+}
+
 // Execute SQL command
 fn executeSQL(state: *CLIState, sql: []const u8) !void {
     if (state.db == null) {
@@ -117,19 +186,26 @@ fn executeSQL(state: *CLIState, sql: []const u8) !void {
         return;
     }
 
+    // Translate MySQL commands to SQLite equivalents
+    const translated_sql = translateMySQLCommand(allocator, sql) catch sql;
+    defer if (translated_sql.ptr != sql.ptr) allocator.free(translated_sql);
+
+    // Use the translated SQL for the rest of the function
+    const actual_sql = translated_sql;
+
     // Show highlighted SQL if enabled
     if (state.syntax_highlighting) {
         print("Executing: ", .{});
-        if (highlightSQL(allocator, sql)) |highlighted| {
+        if (highlightSQL(allocator, actual_sql)) |highlighted| {
             defer allocator.free(highlighted);
             print("{s}\n", .{highlighted});
         } else |_| {
-            print("{s}\n", .{sql});
+            print("{s}\n", .{actual_sql});
         }
     }
 
     var buf: [4096]u8 = undefined;
-    const sql_cstr = createCString(&buf, sql);
+    const sql_cstr = createCString(&buf, actual_sql);
 
     // Reset the callback state for each query
     callback_first_row = true;
@@ -832,20 +908,204 @@ fn highlightSQL(allocator_param: std.mem.Allocator, sql: []const u8) ![]u8 {
     return result.toOwnedSlice();
 }
 
-// Read input from stdin
+// Command history storage
+var command_history: std.ArrayList([]const u8) = undefined;
+var history_index: usize = 0;
+var history_initialized = false;
+
+// Terminal state management
+var original_termios: c.termios = undefined;
+var raw_mode_enabled = false;
+
+fn enableRawMode() !void {
+    if (raw_mode_enabled) return;
+
+    // Get current terminal attributes
+    if (c.tcgetattr(c.STDIN_FILENO, &original_termios) != 0) {
+        return error.TermiosError;
+    }
+
+    // Configure raw mode
+    var raw = original_termios;
+    raw.c_lflag &= ~(@as(c_uint, c.ECHO | c.ICANON | c.ISIG | c.IEXTEN));
+    raw.c_iflag &= ~(@as(c_uint, c.IXON | c.ICRNL));
+    raw.c_oflag &= ~@as(c_uint, c.OPOST);
+    raw.c_cc[c.VMIN] = 1;
+    raw.c_cc[c.VTIME] = 0;
+
+    // Apply raw mode
+    if (c.tcsetattr(c.STDIN_FILENO, c.TCSAFLUSH, &raw) != 0) {
+        return error.TermiosError;
+    }
+
+    raw_mode_enabled = true;
+}
+
+fn disableRawMode() void {
+    if (!raw_mode_enabled) return;
+
+    // Restore original terminal attributes
+    _ = c.tcsetattr(c.STDIN_FILENO, c.TCSAFLUSH, &original_termios);
+    raw_mode_enabled = false;
+}
+
+// Initialize command history
+fn initHistory(allocator_param: std.mem.Allocator) void {
+    if (!history_initialized) {
+        command_history = std.ArrayList([]const u8).init(allocator_param);
+        history_initialized = true;
+    }
+}
+
+// Add command to history
+fn addToHistory(allocator_param: std.mem.Allocator, command: []const u8) !void {
+    if (command.len == 0) return;
+
+    // Don't add duplicate consecutive commands
+    if (command_history.items.len > 0) {
+        if (std.mem.eql(u8, command_history.items[command_history.items.len - 1], command)) {
+            return;
+        }
+    }
+
+    const cmd_copy = try allocator_param.dupe(u8, command);
+    try command_history.append(cmd_copy);
+
+    // Limit history to 100 commands
+    if (command_history.items.len > 100) {
+        allocator_param.free(command_history.orderedRemove(0));
+    }
+
+    history_index = command_history.items.len;
+}
+
+// Read input from stdin with advanced history support
 fn readInput(allocator_param: std.mem.Allocator, prompt: []const u8) !?[]u8 {
+    // Enable raw mode for proper escape sequence handling
+    enableRawMode() catch {
+        // Fall back to simple input if raw mode fails
+        return readInputSimple(allocator_param, prompt);
+    };
+    defer disableRawMode();
+
     print("{s}", .{prompt});
 
     const stdin = std.io.getStdIn().reader();
+    var input_buffer: [4096]u8 = undefined;
+    var pos: usize = 0;
+    var current_history_index = history_index;
 
-    if (try stdin.readUntilDelimiterOrEofAlloc(allocator_param, '\n', 4096)) |input| {
-        const trimmed = std.mem.trim(u8, input, " \t\r\n");
-        const result = try allocator_param.dupe(u8, trimmed);
-        allocator_param.free(input);
-        return result;
-    } else {
-        return null;
+    while (true) {
+        const byte = stdin.readByte() catch |err| switch (err) {
+            error.EndOfStream => return null,
+            else => return err,
+        };
+
+        switch (byte) {
+            '\n', '\r' => {
+                print("\r\n", .{});
+                const trimmed = std.mem.trim(u8, input_buffer[0..pos], " \t\r\n");
+                if (trimmed.len == 0) return try allocator_param.dupe(u8, "");
+
+                const result = try allocator_param.dupe(u8, trimmed);
+                try addToHistory(allocator_param, result);
+                return result;
+            },
+            '\x7f', '\x08' => { // Backspace/Delete
+                if (pos > 0) {
+                    pos -= 1;
+                    print("\x08 \x08", .{}); // Move back, space, move back
+                }
+            },
+            '\x1b' => { // Escape sequence start
+                const next1 = stdin.readByte() catch continue;
+                if (next1 == '[') {
+                    const next2 = stdin.readByte() catch continue;
+                    switch (next2) {
+                        'A' => { // Up arrow
+                            if (command_history.items.len > 0 and current_history_index > 0) {
+                                current_history_index -= 1;
+                                // Clear current line
+                                print("\r{s}", .{prompt});
+                                for (0..pos) |_| print(" ", .{});
+                                print("\r{s}", .{prompt});
+
+                                // Show history command
+                                const hist_cmd = command_history.items[current_history_index];
+                                print("{s}", .{hist_cmd});
+                                @memcpy(input_buffer[0..hist_cmd.len], hist_cmd);
+                                pos = hist_cmd.len;
+                            }
+                        },
+                        'B' => { // Down arrow
+                            if (command_history.items.len > 0) {
+                                if (current_history_index < command_history.items.len - 1) {
+                                    current_history_index += 1;
+                                    // Clear current line
+                                    print("\r{s}", .{prompt});
+                                    for (0..pos) |_| print(" ", .{});
+                                    print("\r{s}", .{prompt});
+
+                                    // Show history command
+                                    const hist_cmd = command_history.items[current_history_index];
+                                    print("{s}", .{hist_cmd});
+                                    @memcpy(input_buffer[0..hist_cmd.len], hist_cmd);
+                                    pos = hist_cmd.len;
+                                } else if (current_history_index == command_history.items.len - 1) {
+                                    // Move beyond history (clear line)
+                                    current_history_index = command_history.items.len;
+                                    print("\r{s}", .{prompt});
+                                    for (0..pos) |_| print(" ", .{});
+                                    print("\r{s}", .{prompt});
+                                    pos = 0;
+                                }
+                            }
+                        },
+                        'C', 'D' => {
+                            // Right/Left arrows - ignore for now
+                        },
+                        else => {
+                            // Other escape sequences - ignore
+                        },
+                    }
+                } else {
+                    // Not a CSI sequence, ignore
+                }
+            },
+            '\x03' => { // Ctrl+C
+                print("\r\n", .{});
+                return null;
+            },
+            else => { // Regular character
+                if (pos < input_buffer.len - 1 and byte >= 32 and byte <= 126) {
+                    input_buffer[pos] = byte;
+                    pos += 1;
+                    print("{c}", .{byte});
+                }
+            },
+        }
     }
+}
+
+// Fallback simple input reader (no raw mode)
+fn readInputSimple(allocator_param: std.mem.Allocator, prompt: []const u8) !?[]u8 {
+    print("{s}", .{prompt});
+
+    const stdin = std.io.getStdIn().reader();
+    if (try stdin.readUntilDelimiterOrEofAlloc(allocator_param, '\n', 4096)) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (trimmed.len == 0) {
+            allocator_param.free(line);
+            return try allocator_param.dupe(u8, "");
+        }
+
+        const result = try allocator_param.dupe(u8, trimmed);
+        allocator_param.free(line);
+        try addToHistory(allocator_param, result);
+        return result;
+    }
+
+    return null;
 }
 
 // Show help
@@ -1040,9 +1300,15 @@ fn createHealthyDatabaseCommand(db_path: []const u8) !void {
 // Main CLI loop
 pub fn runCLI() !void {
     var state = CLIState.init();
-    defer state.deinit();
+    defer {
+        state.deinit();
+        disableRawMode(); // Ensure terminal is restored
+    }
 
-    print("ZSQLite CLI v0.9.1 - Direct SQLite3 bindings for Zig\n", .{});
+    // Initialize command history
+    initHistory(allocator);
+
+    print("ZSQLite CLI v0.9.2 - Direct SQLite3 bindings for Zig\n", .{});
     print("Type \\h for help, \\q to quit.\n\n", .{});
 
     // Try to open default database (in-memory)
@@ -1073,7 +1339,14 @@ pub fn runCLI() !void {
                     showHelp();
                 },
                 .sql => {
-                    executeSQL(&state, command.content) catch |err| {
+                    // Translate MySQL command to SQLite if necessary
+                    const translated_sql = translateMySQLCommand(allocator, command.content) catch |err| {
+                        print("Error translating MySQL command: {}\n", .{err});
+                        return;
+                    };
+                    defer allocator.free(translated_sql);
+
+                    executeSQL(&state, translated_sql) catch |err| {
                         print("Error executing SQL: {}\n", .{err});
                     };
                 },
