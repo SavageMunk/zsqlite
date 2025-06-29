@@ -15,6 +15,11 @@ pub fn build(b: *std.Build) void {
     lib.linkLibC();
     b.installArtifact(lib);
 
+    // Export the library module for use as a dependency
+    _ = b.addModule("zsqlite", .{
+        .root_source_file = b.path("src/root.zig"),
+    });
+
     // CLI executable (separate from library)
     const cli_exe = b.addExecutable(.{
         .name = "zsl",

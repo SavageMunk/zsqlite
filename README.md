@@ -102,11 +102,11 @@ pub fn main() !void {
 **Step 1:** Add to your `build.zig.zon` (Zig package manager):
 ```zig
 .{
-    .name = "my-app",
+    .name = .my_app,
     .version = "0.1.0",
     .dependencies = .{
         .zsqlite = .{
-            .url = "https://github.com/yourusername/zsqlite/archive/refs/tags/v0.9.2.tar.gz",
+            .url = "https://github.com/yourusername/zsqlite/archive/refs/heads/main.tar.gz",
             .hash = "12345...", // Get with: zig fetch --save <url>
         },
     },
