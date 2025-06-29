@@ -8,6 +8,17 @@ zig-out/
 *.sqlite
 *.sqlite3
 
+# Temporary development files
+*_demo.sh
+*_test.txt
+*_commands.sh
+test_*.sh
+demo_*.txt
+CLI_DOCUMENTATION.md
+*_old.zig
+*_new.zig
+backup_*.db
+
 # Editor files
 .vscode/
 .idea/

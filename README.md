@@ -21,17 +21,61 @@ This project documents a **critical finding** that can save hours of debugging f
 
 ```
 zsqlite/
-├── build.zig                 # Build configuration  
+├── build.zig                 # Build configuration with library and CLI targets
 ├── src/
-│   └── main.zig             # Examples and demonstrations
+│   ├── main.zig             # Library implementation (all 47 SQLite functions)
+│   └── cli.zig              # CLI implementation (zsl command)
+├── examples/
+│   ├── README.md            # CLI usage examples and documentation
+│   └── test_cli.sql         # Comprehensive test script
 ├── .gitignore               # Git ignore patterns
 ├── LICENSE                  # MIT License
 └── README.md                # This file
 ```
 
-## Prerequisites
+## Getting Started
 
-### System Requirements
+### Quick Start with CLI
+```bash
+# Clone and build
+git clone <repository-url>
+cd zsqlite
+zig build
+
+# Run the interactive CLI
+zig build cli
+# or
+./zig-out/bin/zsl
+
+# Try some commands
+zsl> CREATE TABLE test (id INTEGER, name TEXT);
+zsl> INSERT INTO test VALUES (1, 'Hello');
+zsl> SELECT * FROM test;
+zsl> SHOW TABLES;
+zsl> DESC test;
+zsl> \q
+```
+
+### Using as a Library
+```zig
+const std = @import("std");
+const zsqlite = @import("zsqlite");
+
+pub fn main() !void {
+    // Use the 47 implemented SQLite functions
+    // See src/main.zig for complete examples
+}
+```
+
+### Build Targets
+```bash
+zig build              # Build library and executables
+zig build cli          # Run the CLI (zsl)
+zig build demo         # Run the library demo
+zig build run          # Run the library demo (default)
+```
+
+## Prerequisites
 - Zig compiler (tested with 0.15.0-dev.847+850655f06)
 - SQLite3 development libraries
 - C runtime library support
@@ -325,7 +369,7 @@ SQLite has 200+ functions, but most applications only need a core subset. This r
 - ✓ `sqlite3_wal_checkpoint_v2()` - Advanced WAL checkpoint control
 - ✓ `sqlite3_wal_autocheckpoint()` - Set automatic checkpoint interval
 
-### **Phase 8: CLI Implementation & Documentation (IN PROGRESS)**
+### **Phase 8: CLI Implementation & Documentation (COMPLETED)**
 *Command-line interface and comprehensive documentation*
 
 **SQLite Function Coverage Analysis:**
@@ -335,12 +379,14 @@ SQLite has 200+ functions, but most applications only need a core subset. This r
 - ✓ **Complete coverage** of essential functions needed for 90% of SQLite applications
 
 **CLI Implementation (zsl):**
-- [ ] Command-line interface with MySQL-like syntax
-- [ ] Interactive shell mode
-- [ ] Batch processing mode
+- ✅ **Command-line interface with MySQL-like syntax** - SHOW TABLES, DESC table, etc.
+- ✅ **Interactive shell mode** - Full REPL with multiline support
+- ✅ **Batch processing mode** - Can execute SQL files
+- ✅ **Performance monitoring** - Execution timing for all queries
+- ✅ **Transaction support** - Visual transaction state in prompt
+- ✅ **Meta commands** - \o, \c, \l, \d, \s, \h, \q
 - [ ] Export/import functionality
 - [ ] Schema visualization
-- [ ] Performance monitoring
 
 **Comprehensive Documentation:**
 - [ ] Function reference with copy-paste examples
@@ -437,7 +483,7 @@ SQLite has 200+ functions, but most applications only need a core subset. This r
 **v0.5.0** - Phase 5 (COMPLETED) - Database introspection
 **v0.6.0** - Phase 6 (COMPLETED) - Performance & optimization
 **v0.7.0** - Phase 7 (COMPLETED) - Advanced features
-**v0.8.0** - Phase 8 (IN PROGRESS) - CLI & documentation
+**v0.8.0** - Phase 8 (COMPLETED) - CLI & documentation
 **v0.9.0** - Phase 9 (PLANNED) - CLI enhancement & advanced docs
 **v1.0.0** - Phase 10 (PLANNED) - Testing & production release
 
